@@ -1,0 +1,44 @@
+JvMTECH:
+  Anonymizer:
+    dummyAssets:
+      'text/csv': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.csv'
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.docx'
+      'image/gif': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.gif'
+      'image/jpeg': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.jpg'
+      'video/mp4': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.mp4'
+      'application/vnd.oasis.opendocument.text': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.odt'
+      'application/pdf': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.pdf'
+      'image/png': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.png'
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.pptx'
+      'image/svg+xml': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.svg'
+      'text/plain': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.txt'
+      'video/webm': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.webm'
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.xlsx'
+      'application/zip': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.zip'
+
+    nodeTypes: []
+    domainModels: []
+
+# Examples:
+#
+#    nodeTypes:
+#
+#      'Your.Vendor:Your.NodeType':
+#        properties:
+#          name:
+#            anonymize: true
+#          email:
+#            shuffle: true
+#          video:
+#            anonymize: true
+#
+#    domainModels:
+#
+#      'Your\Vendor\Domain\Repository\YourModelRepository':
+#        properties:
+#          name:
+#            anonymize: true
+#          email:
+#            shuffle: true
+#          video:
+#            anonymize: true
