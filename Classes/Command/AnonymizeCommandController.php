@@ -2,12 +2,15 @@
 namespace JvMTECH\Anonymizer\Command;
 
 use Neos\Flow\Annotations as Flow;
+use JvMTECH\Anonymizer\Domain\Model\AnonymizationStatus;
+use JvMTECH\Anonymizer\Domain\Repository\AnonymizationStatusRepository;
 use Neos\ContentRepository\Domain\Model\NodeData;
 use Neos\ContentRepository\Domain\Repository\NodeDataRepository;
 use Neos\ContentRepository\Exception\NodeException;
 use Neos\Flow\Cli\CommandController;
 use Neos\Flow\Persistence\Doctrine\PersistenceManager;
 use Neos\Flow\Persistence\Exception\IllegalObjectTypeException;
+use Neos\Flow\Persistence\Exception\InvalidQueryException;
 use Neos\Flow\Persistence\RepositoryInterface;
 use Neos\Flow\Reflection\ReflectionService;
 use Neos\Flow\ResourceManagement\Exception;
@@ -57,10 +60,16 @@ class AnonymizeCommandController extends CommandController
     protected ReflectionService $reflectionService;
 
     /**
+     * @Flow\Inject
+     */
+    protected AnonymizationStatusRepository $anonymizationStatusRepository;
+
+    /**
      * Anonymize configured NodeTypes
      *
      * Create a configuration and run this command to anonymize or shuffle and immediately persist properties of NodeTypes.
      *
+     * @param string $only If set, only these NodeType names are processed - comma separated
      * @param bool $test If set, no changes will be persisted and output will be verbose
      * @param bool $verbose If set, output will be verbose
      * @param bool $force If set, changes will be persisted
@@ -68,8 +77,9 @@ class AnonymizeCommandController extends CommandController
      * @throws Exception
      * @throws IllegalObjectTypeException
      * @throws NodeException
+     * @throws InvalidQueryException
      */
-    public function nodeTypesCommand(bool $test = false, bool $verbose = false, bool $force = false): void
+    public function nodeTypesCommand(string $only = '', bool $test = false, bool $verbose = false, bool $force = false): void
     {
         if (!array_key_exists('nodeTypes', $this->settings)) {
             $this->outputLine('No NodeTypes configured in Settings.yaml');
@@ -82,18 +92,58 @@ class AnonymizeCommandController extends CommandController
             return;
         }
 
+        if ($only) {
+            $only = explode(',', $only);
+            $only = array_map('trim', $only);
+        } else {
+            $only = [];
+        }
+
         foreach ($this->settings['nodeTypes'] as $nodeTypeName => $nodeTypeSettings) {
-            $query = $this->nodeDataRepository->createQuery();
-            $query->matching($query->equals('nodeType', $nodeTypeName));
-            $result = $query->execute();
+            if (count($only) > 0 && !in_array($nodeTypeName, $only)) {
+                continue;
+            }
 
             $this->outputLine('');
-            $this->outputLine($result->count() . ' ' . $nodeTypeName . ' NodeTypes to anonymize..');
+            $this->outputLine('Process ' . $nodeTypeName . ' NodeType:');
+
+            /** @var AnonymizationStatus $lastAnonymizationStatus */
+            $lastAnonymizationStatus = $this->anonymizationStatusRepository->findLastOneByName('nodeType::' . $nodeTypeName);
+            $lastAnonymizationDateTime = $lastAnonymizationStatus?->getToDateTime();
+            $olderThanDateTime = null;
+
+            $query = $this->nodeDataRepository->createQuery();
+            $queries = [];
+
+            $queries[] = $query->equals('nodeType', $nodeTypeName);
+
+            if (isset($nodeTypeSettings['dateTimeFilter']['propertyName']) && isset($nodeTypeSettings['dateTimeFilter']['olderThan'])) {
+                $dateTimePropertyName = $nodeTypeSettings['dateTimeFilter']['propertyName'];
+                if (is_numeric($nodeTypeSettings['dateTimeFilter']['olderThan'])) {
+                    $olderThanDateTime = new \DateTime('now');
+                    $olderThanDateTime->setTime(0, 0, 0, 0);
+                    $olderThanDateTime->modify((string) $nodeTypeSettings['dateTimeFilter']['olderThan'] . ' days');
+                } else {
+                    $olderThanDateTime = new \DateTime($nodeTypeSettings['dateTimeFilter']['olderThan']);
+                }
+
+                $this->outputLine('- Filter by DateTime Property "' . $dateTimePropertyName . '" older than "' . $olderThanDateTime->format('Y-m-d H:i:s') . '"' . ($lastAnonymizationDateTime ? ' but newer than "' . $lastAnonymizationDateTime->format('Y-m-d H:i:s') . '"' : '') . '.');
+
+                if ($lastAnonymizationDateTime) {
+                    $queries[] = $query->greaterThanOrEqual($dateTimePropertyName, $lastAnonymizationDateTime);
+                }
+
+                $queries[] = $query->lessThan($dateTimePropertyName, $olderThanDateTime);
+            }
+
+            $query->matching($query->logicalAnd($queries));
+            $result = $query->execute();
+
+            $this->outputLine('- ' . $result->count() . ' entries to anonymize..');
 
             /** @var NodeData $nodeData */
             foreach ($result as $nodeData) {
                 if ($test || $verbose) {
-                    $this->outputLine('');
                     $this->outputLine($nodeData->getIdentifier() . ':');
                 }
                 foreach ($nodeTypeSettings['properties'] as $propertyName => $propertySettings) {
@@ -108,9 +158,21 @@ class AnonymizeCommandController extends CommandController
                 $this->nodeDataRepository->persistEntities();
             }
 
-            $this->outputLine('');
             $this->outputLine('Done.');
             $this->outputLine('');
+
+            if (!$test) {
+                $anonymizationStatus = new AnonymizationStatus();
+                $anonymizationStatus->setName('nodeType::' . $nodeTypeName);
+                if ($lastAnonymizationDateTime) {
+                    $anonymizationStatus->setFromDateTime($lastAnonymizationDateTime);
+                }
+                $anonymizationStatus->setToDateTime($olderThanDateTime ?: new \DateTime());
+                $anonymizationStatus->setExecutedDateTime(new \DateTime());
+                $anonymizationStatus->setAnonymizedRecords($result->count());
+
+                $this->anonymizationStatusRepository->add($anonymizationStatus);
+            }
         }
     }
 
@@ -119,6 +181,7 @@ class AnonymizeCommandController extends CommandController
      *
      * Create a configuration and run this command to anonymize or shuffle and immediately persist properties of Domain Models.
      *
+     * @param string $only If set, only these repository class names are processed - comma separated
      * @param bool $test If set, no changes will be persisted and output will be verbose
      * @param bool $verbose If set, output will be verbose
      * @param bool $force If set, changes will be persisted
@@ -127,7 +190,7 @@ class AnonymizeCommandController extends CommandController
      * @throws IllegalObjectTypeException
      * @throws PropertyNotAccessibleException
      */
-    public function domainModelsCommand(bool $test = false, bool $verbose = false, bool $force = false): void
+    public function domainModelsCommand(string $only = '', bool $test = false, bool $verbose = false, bool $force = false): void
     {
         if (!array_key_exists('domainModels', $this->settings)) {
             $this->outputLine('No Domain Models configured in Settings.yaml');
@@ -140,34 +203,72 @@ class AnonymizeCommandController extends CommandController
             return;
         }
 
+        if ($only) {
+            $only = explode(',', $only);
+            $only = array_map('trim', $only);
+        } else {
+            $only = [];
+        }
+
         foreach ($this->settings['domainModels'] as $repositoryClass => $modelSettings) {
+            if (count($only) > 0 && !in_array($repositoryClass, $only)) {
+                continue;
+            }
+
             $repository = $this->objectManager->get($repositoryClass);
             if (!$repository || !$this->reflectionService->isClassImplementationOf($repository::class, RepositoryInterface::class)) {
-
                 $this->outputLine($repositoryClass . ' is not a valid Domain Model.');
                 continue;
             }
 
-            $result = $repository->findAll();
+            /** @var AnonymizationStatus $lastAnonymizationStatus */
+            $lastAnonymizationStatus = $this->anonymizationStatusRepository->findLastOneByName('domainModel::' . $repositoryClass);
+            $lastAnonymizationDateTime = $lastAnonymizationStatus?->getToDateTime();
+            $olderThanDateTime = null;
 
-            if ($result->count() < 1) {
-                $this->outputLine('No ' . $repositoryClass . ' Domain Model Entries found.');
-                continue;
-            }
+            $query = $repository->createQuery();
+            $queries = [];
 
             $this->outputLine('');
-            $this->outputLine($result->count() . ' ' . $repositoryClass . ' Domain Model Entries to anonymize..');
+            $this->outputLine('Process ' . $repositoryClass . ' Domain Model:');
 
-            $modelProperties = $this->reflectionService->getClassPropertyNames($result->getFirst()::class);
+            if (isset($modelSettings['dateTimeFilter']['propertyName']) && isset($modelSettings['dateTimeFilter']['olderThan'])) {
+                $dateTimePropertyName = $modelSettings['dateTimeFilter']['propertyName'];
+                if (is_numeric($modelSettings['dateTimeFilter']['olderThan'])) {
+                    $olderThanDateTime = new \DateTime('now');
+                    $olderThanDateTime->setTime(0, 0, 0, 0);
+                    $olderThanDateTime->modify((string) $modelSettings['dateTimeFilter']['olderThan'] . ' days');
+                } else {
+                    $olderThanDateTime = new \DateTime($modelSettings['dateTimeFilter']['olderThan']);
+                }
+
+                $this->outputLine('- Filter by DateTime Property "' . $dateTimePropertyName . '" older than "' . $olderThanDateTime->format('Y-m-d H:i:s') . '"' . ($lastAnonymizationDateTime ? ' but newer than "' . $lastAnonymizationDateTime->format('Y-m-d H:i:s') . '"' : '') . '..');
+
+                if ($lastAnonymizationDateTime) {
+                    $queries[] = $query->greaterThanOrEqual($dateTimePropertyName, $lastAnonymizationDateTime);
+                }
+
+                $queries[] = $query->lessThan($dateTimePropertyName, $olderThanDateTime);
+            }
+
+            if ($queries) {
+                $query->matching($query->logicalAnd($queries));
+                $result = $query->execute();
+            } else {
+                $result = $repository->findAll();
+            }
+
+            $this->outputLine('- ' . $result->count() . ' entries to anonymize..');
+
+            $modelProperties = $result->count() > 0 ? $this->reflectionService->getClassPropertyNames($result->getFirst()::class) : null;
 
             foreach ($result as $entry) {
                 if ($test || $verbose) {
-                    $this->outputLine('');
-                    $this->outputLine($this->persistenceManager->getIdentifierByObject($entry) . ':');
+                    $this->outputLine('- ' . $this->persistenceManager->getIdentifierByObject($entry) . ':');
                 }
                 foreach ($modelSettings['properties'] as $propertyName => $propertySettings) {
                     if (!in_array($propertyName, $modelProperties)) {
-                        $this->outputLine('Property ' . $propertyName . ' not found in Domain Model ' . $repositoryClass . '.');
+                        $this->outputLine('- Property ' . $propertyName . ' not found in Domain Model ' . $repositoryClass . '.');
                         continue;
                     }
 
@@ -182,9 +283,21 @@ class AnonymizeCommandController extends CommandController
                 $repository->update($entry);
             }
 
-            $this->outputLine('');
             $this->outputLine('Done.');
             $this->outputLine('');
+
+            if (!$test) {
+                $anonymizationStatus = new AnonymizationStatus();
+                $anonymizationStatus->setName('domainModel::' . $repositoryClass);
+                if ($lastAnonymizationDateTime) {
+                    $anonymizationStatus->setFromDateTime($lastAnonymizationDateTime);
+                }
+                $anonymizationStatus->setToDateTime($olderThanDateTime ?: new \DateTime());
+                $anonymizationStatus->setExecutedDateTime(new \DateTime());
+                $anonymizationStatus->setAnonymizedRecords($result->count());
+
+                $this->anonymizationStatusRepository->add($anonymizationStatus);
+            }
         }
     }
 

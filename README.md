@@ -51,6 +51,10 @@ JvMTECH:
     domainModels:
 
       'Your\Vendor\Domain\Repository\YourModelRepository':
+        dateTimeFilter: # optional
+          propertyName: 'creationDateTime'
+          olderThan: -90 # days
+          # olderThan: '2023-01-01 00:00:00' # or by date
         properties:
           name:
             anonymize: true
@@ -60,9 +64,15 @@ JvMTECH:
             anonymize: true
 ```
 
-## Example Usage
+## Example Usage "Delete user data older than 90 days"
 
-1. Clone the productive project container
+1. Add a "Your\Vendor\Domain\Repository\YourModelRepository" configuration with `dateTimeFilter.propertyName: 'creationDateTime'` and `dateTimeFilter.olderThan: -90`, and matching property settings
+2. Run the anonymizer command `./flow anonymize:domainmodels --only "Your\Vendor\Domain\Repository\YourModelRepository" --force` once a month
+
+## Example Usage "Create clean data for local development"
+
+1. Add a "Your.Vendor:Your.NodeType" configuration with matching property settings
+2. Clone the productive project container
 2. Run the anonymizer commands `./flow anonymize:nodetypes --force` and `./flow anonymize:domainmodels --force`
 3. Remove all assets you don't need anyways `./flow media:removeunused --assume-yes`
 4. Do more specific stuff you need to do
@@ -70,6 +80,7 @@ JvMTECH:
 
 ## Whishlist
 
+- [x] Filter by datetime to handle automatic anonymization of old data
 - [ ] Options to define type specific ranges
   - [ ] Ex. DateTime: "Randomize to +/- 6 Months from initial value"
   - [ ] Ex. Number: "Random number between 100 and 1000"
