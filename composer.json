@@ -2,6 +2,7 @@
     "name": "jvmtech/anonymizer",
     "description": "Anonymize property values in Neos CMS NodeTypes and Neos Flow Domain Models",
     "type": "neos-package",
+    "license": "MIT",
     "authors": [
         {
             "name": "Jung von Matt TECH",
