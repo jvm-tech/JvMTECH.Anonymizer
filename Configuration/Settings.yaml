@@ -16,8 +16,8 @@ JvMTECH:
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.xlsx'
       'application/zip': 'resource://JvMTECH.Anonymizer/Private/DummyAssets/anonymized.zip'
 
-    nodeTypes: []
-    domainModels: []
+    #nodeTypes: []
+    #domainModels: []
 
 # Examples:
 #
