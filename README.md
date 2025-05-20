@@ -11,6 +11,13 @@ Anonymize property values in Neos CMS NodeTypes and Neos Flow Domain Models.
 composer require jvmtech/anonymizer
 ```
 
+## Neos Compatibility
+| Neos Version | Package Version |
+|--------------|-----------------|
+| 9.x          | 2.x             |
+| 8.x          | 1.x             |
+
+
 ## Supported property types
 
 - Text
