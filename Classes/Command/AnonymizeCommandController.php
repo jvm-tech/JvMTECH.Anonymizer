@@ -1,12 +1,20 @@
 <?php
+
 namespace JvMTECH\Anonymizer\Command;
 
+use Neos\ContentRepository\Core\Feature\NodeModification\Command\SetNodeProperties;
+use Neos\ContentRepository\Core\Feature\NodeModification\Dto\PropertyValuesToWrite;
+use Neos\ContentRepository\Core\Feature\WorkspaceRebase\Dto\RebaseErrorHandlingStrategy;
+use Neos\ContentRepository\Core\NodeType\NodeTypeNames;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindDescendantNodesFilter;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\NodeType\NodeTypeCriteria;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\PropertyValue\PropertyValueCriteriaParser;
+use Neos\ContentRepository\Core\Service\WorkspaceMaintenanceServiceFactory;
+use Neos\ContentRepository\Core\SharedModel\Workspace\WorkspaceName;
+use Neos\ContentRepositoryRegistry\ContentRepositoryRegistry;
 use Neos\Flow\Annotations as Flow;
 use JvMTECH\Anonymizer\Domain\Model\AnonymizationStatus;
 use JvMTECH\Anonymizer\Domain\Repository\AnonymizationStatusRepository;
-use Neos\ContentRepository\Domain\Model\NodeData;
-use Neos\ContentRepository\Domain\Repository\NodeDataRepository;
-use Neos\ContentRepository\Exception\NodeException;
 use Neos\Flow\Cli\CommandController;
 use Neos\Flow\Persistence\Doctrine\PersistenceManager;
 use Neos\Flow\Persistence\Exception\IllegalObjectTypeException;
@@ -16,8 +24,11 @@ use Neos\Flow\Reflection\ReflectionService;
 use Neos\Flow\ResourceManagement\Exception;
 use Neos\Flow\ResourceManagement\ResourceManager;
 use Neos\Media\Domain\Model\Asset;
-use Neos\Media\Domain\Repository\AssetCollectionRepository;
 use Neos\Media\Domain\Repository\AssetRepository;
+use Neos\Neos\Domain\Model\Site;
+use Neos\Neos\Domain\Repository\SiteRepository;
+use Neos\Neos\Domain\Service\NodeTypeNameFactory;
+use Neos\Neos\Domain\SubtreeTagging\NeosVisibilityConstraints;
 use Neos\Utility\Exception\PropertyNotAccessibleException;
 
 /**
@@ -25,44 +36,22 @@ use Neos\Utility\Exception\PropertyNotAccessibleException;
  */
 class AnonymizeCommandController extends CommandController
 {
-    /**
-     * @Flow\Inject
-     */
-    protected NodeDataRepository $nodeDataRepository;
-
-    /**
-     * @Flow\InjectConfiguration()
-     */
+    #[Flow\InjectConfiguration]
     protected array $settings;
-    /**
-     * @Flow\Inject
-     */
+    #[Flow\Inject]
     protected AssetRepository $assetRepository;
-
-    /**
-     * @Flow\Inject
-     */
-    protected AssetCollectionRepository $assetCollectionRepository;
-
-    /**
-     * @Flow\Inject
-     */
+    #[Flow\Inject]
     protected ResourceManager $resourceManager;
-
-    /**
-     * @Flow\Inject
-     */
+    #[Flow\Inject]
     protected PersistenceManager $persistenceManager;
-
-    /**
-     * @Flow\Inject
-     */
+    #[Flow\Inject]
     protected ReflectionService $reflectionService;
-
-    /**
-     * @Flow\Inject
-     */
+    #[Flow\Inject]
     protected AnonymizationStatusRepository $anonymizationStatusRepository;
+    #[Flow\Inject]
+    protected SiteRepository $siteRepository;
+    #[Flow\Inject]
+    protected ContentRepositoryRegistry $contentRepositoryRegistry;
 
     /**
      * Anonymize configured NodeTypes
@@ -76,10 +65,9 @@ class AnonymizeCommandController extends CommandController
      * @return void
      * @throws Exception
      * @throws IllegalObjectTypeException
-     * @throws NodeException
      * @throws InvalidQueryException
      */
-    public function nodeTypesCommand(string $only = '', bool $test = false, bool $verbose = false, bool $force = false): void
+    public function nodeTypesCommand(string $only = '', bool $test = false, bool $verbose = false, bool $force = false, bool $rebaseWorkspaces = false): void
     {
         if (!array_key_exists('nodeTypes', $this->settings)) {
             $this->outputLine('No NodeTypes configured in Settings.yaml');
@@ -99,6 +87,17 @@ class AnonymizeCommandController extends CommandController
             $only = [];
         }
 
+        $site = $this->siteRepository->findFirstOnline();
+        assert($site instanceof Site);
+
+        $contentRepository = $this->contentRepositoryRegistry->get($site->getConfiguration()->contentRepositoryId);
+        $liveWorkspace = $contentRepository->findWorkspaceByName(WorkspaceName::forLive());
+
+        $rootNode = $contentRepository
+            ->getContentGraph($liveWorkspace->workspaceName)
+            ->findRootNodeAggregateByType(NodeTypeNameFactory::forSites());
+
+        $count = 0;
         foreach ($this->settings['nodeTypes'] as $nodeTypeName => $nodeTypeSettings) {
             if (count($only) > 0 && !in_array($nodeTypeName, $only)) {
                 continue;
@@ -107,59 +106,85 @@ class AnonymizeCommandController extends CommandController
             $this->outputLine('');
             $this->outputLine('Process ' . $nodeTypeName . ' NodeType:');
 
-            /** @var AnonymizationStatus $lastAnonymizationStatus */
+            /** @var ?AnonymizationStatus $lastAnonymizationStatus */
             $lastAnonymizationStatus = $this->anonymizationStatusRepository->findLastOneByName('nodeType::' . $nodeTypeName);
             $lastAnonymizationDateTime = $lastAnonymizationStatus?->getToDateTime();
             $olderThanDateTime = null;
 
-            $query = $this->nodeDataRepository->createQuery();
-            $queries = [];
-
-            $queries[] = $query->equals('nodeType', $nodeTypeName);
+            $propertyValueCriteria = null;
 
             if (isset($nodeTypeSettings['dateTimeFilter']['propertyName']) && isset($nodeTypeSettings['dateTimeFilter']['olderThan'])) {
                 $dateTimePropertyName = $nodeTypeSettings['dateTimeFilter']['propertyName'];
                 if (is_numeric($nodeTypeSettings['dateTimeFilter']['olderThan'])) {
                     $olderThanDateTime = new \DateTime('now');
                     $olderThanDateTime->setTime(0, 0, 0, 0);
-                    $olderThanDateTime->modify((string) $nodeTypeSettings['dateTimeFilter']['olderThan'] . ' days');
+                    $olderThanDateTime->modify((string)$nodeTypeSettings['dateTimeFilter']['olderThan'] . ' days');
                 } else {
                     $olderThanDateTime = new \DateTime($nodeTypeSettings['dateTimeFilter']['olderThan']);
                 }
-
-                $this->outputLine('- Filter by DateTime Property "' . $dateTimePropertyName . '" older than "' . $olderThanDateTime->format('Y-m-d H:i:s') . '"' . ($lastAnonymizationDateTime ? ' but newer than "' . $lastAnonymizationDateTime->format('Y-m-d H:i:s') . '"' : '') . '.');
-
                 if ($lastAnonymizationDateTime) {
-                    $queries[] = $query->greaterThanOrEqual($dateTimePropertyName, $lastAnonymizationDateTime);
+                    $propertyValueCriteria = PropertyValueCriteriaParser::parse(
+                        sprintf(
+                            '%s >= %s AND %s < %s',
+                            $dateTimePropertyName,
+                            $lastAnonymizationDateTime->format('Y-m-d H:i:s'),
+                            $dateTimePropertyName,
+                            $olderThanDateTime->format('Y-m-d H:i:s')
+                        )
+                    );
+                } else {
+                    $propertyValueCriteria = PropertyValueCriteriaParser::parse(
+                        sprintf(
+                            '%s < %s',
+                            $dateTimePropertyName,
+                            $olderThanDateTime->format('Y-m-d H:i:s')
+                        )
+                    );
                 }
-
-                $queries[] = $query->lessThan($dateTimePropertyName, $olderThanDateTime);
             }
 
-            $query->matching($query->logicalAnd($queries));
-            $result = $query->execute();
-
-            $this->outputLine('- ' . $result->count() . ' entries to anonymize..');
-
-            /** @var NodeData $nodeData */
-            foreach ($result as $nodeData) {
-                if ($test || $verbose) {
-                    $this->outputLine($nodeData->getIdentifier() . ':');
+            foreach ($contentRepository->getVariationGraph()->getDimensionSpacePoints() as $dimensionSpacePoint) {
+                $subgraph = $contentRepository
+                    ->getContentGraph($liveWorkspace->workspaceName)
+                    ->getSubgraph(
+                        $dimensionSpacePoint,
+                        NeosVisibilityConstraints::excludeRemoved(),
+                    );
+                $siteNode = $subgraph->findNodeByPath($site->getNodeName()->toNodeName(), $rootNode->nodeAggregateId);
+                if ($siteNode === null) {
+                    continue;
                 }
-                foreach ($nodeTypeSettings['properties'] as $propertyName => $propertySettings) {
-                    $oldValue = $nodeData->getProperty($propertyName);
-                    $newValue = $this->processPropertyValue($propertyName, $propertySettings, $oldValue, $test, $verbose);
+                $nodes = $subgraph->findDescendantNodes(
+                    $siteNode->aggregateId,
+                    FindDescendantNodesFilter::create(
+                        NodeTypeCriteria::createWithAllowedNodeTypeNames(NodeTypeNames::fromStringArray([$nodeTypeName])),
+                        $propertyValueCriteria,
+                    )
+                );
 
-                    if ($test === false && $newValue) {
-                        $nodeData->setProperty($propertyName, $newValue);
+                foreach ($nodes as $node) {
+                    if ($test || $verbose) {
+                        $this->outputLine($node->aggregateId->value . ':');
+                    }
+                    foreach ($nodeTypeSettings['properties'] as $propertyName => $propertySettings) {
+                        $oldValue = $node->getProperty($propertyName);
+                        $newValue = $this->processPropertyValue($propertyName, $propertySettings, $oldValue, $test, $verbose);
+                        if ($test === false && $newValue) {
+                            $contentRepository->handle(
+                                SetNodeProperties::create(
+                                    $liveWorkspace->workspaceName,
+                                    $node->aggregateId,
+                                    $node->originDimensionSpacePoint,
+                                    PropertyValuesToWrite::fromArray(
+                                        [$propertyName => $newValue],
+                                    )
+                                )
+                            );
+                            $count++;
+                        }
                     }
                 }
-
-                $this->nodeDataRepository->persistEntities();
             }
-
-            $this->outputLine('Done.');
-            $this->outputLine('');
 
             if (!$test) {
                 $anonymizationStatus = new AnonymizationStatus();
@@ -169,9 +194,19 @@ class AnonymizeCommandController extends CommandController
                 }
                 $anonymizationStatus->setToDateTime($olderThanDateTime ?: new \DateTime());
                 $anonymizationStatus->setExecutedDateTime(new \DateTime());
-                $anonymizationStatus->setAnonymizedRecords($result->count());
+                $anonymizationStatus->setAnonymizedRecords($count);
 
                 $this->anonymizationStatusRepository->add($anonymizationStatus);
+            }
+
+            if (!$test && $rebaseWorkspaces) {
+                $workspaceMaintenanceService = $this->contentRepositoryRegistry->buildService(
+                        $contentRepository->id,
+                        new WorkspaceMaintenanceServiceFactory()
+                );
+                $workspaceMaintenanceService->rebaseOutdatedWorkspaces(
+                    $force ? RebaseErrorHandlingStrategy::STRATEGY_FORCE : RebaseErrorHandlingStrategy::STRATEGY_FAIL
+                );
             }
         }
     }
@@ -216,12 +251,13 @@ class AnonymizeCommandController extends CommandController
             }
 
             $repository = $this->objectManager->get($repositoryClass);
-            if (!$repository || !$this->reflectionService->isClassImplementationOf($repository::class, RepositoryInterface::class)) {
+            if (!$repository || !$this->reflectionService->isClassImplementationOf($repository::class,
+                    RepositoryInterface::class)) {
                 $this->outputLine($repositoryClass . ' is not a valid Domain Model.');
                 continue;
             }
 
-            /** @var AnonymizationStatus $lastAnonymizationStatus */
+            /** @var ?AnonymizationStatus $lastAnonymizationStatus */
             $lastAnonymizationStatus = $this->anonymizationStatusRepository->findLastOneByName('domainModel::' . $repositoryClass);
             $lastAnonymizationDateTime = $lastAnonymizationStatus?->getToDateTime();
             $olderThanDateTime = null;
@@ -237,7 +273,7 @@ class AnonymizeCommandController extends CommandController
                 if (is_numeric($modelSettings['dateTimeFilter']['olderThan'])) {
                     $olderThanDateTime = new \DateTime('now');
                     $olderThanDateTime->setTime(0, 0, 0, 0);
-                    $olderThanDateTime->modify((string) $modelSettings['dateTimeFilter']['olderThan'] . ' days');
+                    $olderThanDateTime->modify((string)$modelSettings['dateTimeFilter']['olderThan'] . ' days');
                 } else {
                     $olderThanDateTime = new \DateTime($modelSettings['dateTimeFilter']['olderThan']);
                 }
@@ -316,7 +352,7 @@ class AnonymizeCommandController extends CommandController
         $newValue = null;
 
         if ($oldValue instanceof Asset) {
-            if (array_key_exists($oldValue->getMediaType(), $this->settings['dummyAssets'])){
+            if (array_key_exists($oldValue->getMediaType(), $this->settings['dummyAssets'])) {
                 $newPersistentResource = $this->resourceManager->importResourceFromContent(
                     file_get_contents($this->settings['dummyAssets'][$oldValue->getMediaType()]),
                     $oldValue->getResource()->getFilename(),
@@ -335,43 +371,51 @@ class AnonymizeCommandController extends CommandController
                 }
             }
 
-        } else if (array_key_exists('shuffle', $propertySettings) && $propertySettings['shuffle']) {
-            if (is_string($oldValue)) {
-                $newValue = $this->mbStrShuffle($oldValue);
+        } else {
+            if (array_key_exists('shuffle', $propertySettings) && $propertySettings['shuffle']) {
+                if (is_string($oldValue)) {
+                    $newValue = $this->mbStrShuffle($oldValue);
 
-                if ($test || $verbose) {
-                    $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue . '" to "' . $newValue . '"');
+                    if ($test || $verbose) {
+                        $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue . '" to "' . $newValue . '"');
+                    }
+
+                } else {
+                    if ($oldValue instanceof \DateTime) {
+                        $oldDateTimeString = $oldValue->format('YmdHis');
+                        $newDateTimeString = $this->mbStrShuffle($oldDateTimeString);
+                        $newValue = \DateTime::createFromFormat('YmdHis', $newDateTimeString);
+
+                        if ($test || $verbose) {
+                            $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue->format('Y-m-d H:i:s') . '" to "' . $newValue->format('Y-m-d H:i:s') . '"');
+                        }
+                    }
                 }
 
-            } else if ($oldValue instanceof \DateTime) {
-                $oldDateTimeString = $oldValue->format('YmdHis');
-                $newDateTimeString = $this->mbStrShuffle($oldDateTimeString);
-                $newValue = \DateTime::createFromFormat('YmdHis', $newDateTimeString);
+            } else {
+                if (array_key_exists('anonymize', $propertySettings) && $propertySettings['anonymize']) {
+                    if (is_string($oldValue)) {
+                        $newValue = preg_replace_callback('/./', function () {
+                            return chr(mt_rand(97, 122));
+                        }, $oldValue);
 
-                if ($test || $verbose) {
-                    $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue->format('Y-m-d H:i:s') . '" to "' . $newValue->format('Y-m-d H:i:s') . '"');
-                }
-            }
+                        if ($test || $verbose) {
+                            $this->outputLine('- Anonymizing property "' . $propertyName . '" from "' . $oldValue . '" to "' . $newValue . '"');
+                        }
 
-        } else if (array_key_exists('anonymize', $propertySettings) && $propertySettings['anonymize']) {
-            if (is_string($oldValue)) {
-                $newValue = preg_replace_callback('/./', function(){
-                    return chr(mt_rand(97, 122));
-                }, $oldValue);
+                    } else {
+                        if ($oldValue instanceof \DateTime) {
+                            $oldDateTimeString = 'YYYYmmddHHiiss';
+                            $newDateTimeString = preg_replace_callback('/./', function () {
+                                return mt_rand(0, 9);
+                            }, $oldDateTimeString);
+                            $newValue = \DateTime::createFromFormat('YmdHis', $newDateTimeString);
 
-                if ($test || $verbose) {
-                    $this->outputLine('- Anonymizing property "' . $propertyName . '" from "' . $oldValue . '" to "' . $newValue . '"');
-                }
-
-            } else if ($oldValue instanceof \DateTime) {
-                $oldDateTimeString = 'YYYYmmddHHiiss';
-                $newDateTimeString = preg_replace_callback('/./', function(){
-                    return mt_rand(0, 9);
-                }, $oldDateTimeString);
-                $newValue = \DateTime::createFromFormat('YmdHis', $newDateTimeString);
-
-                if ($test || $verbose) {
-                    $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue->format('Y-m-d H:i:s') . '" to "' . $newValue->format('Y-m-d H:i:s') . '"');
+                            if ($test || $verbose) {
+                                $this->outputLine('- Shuffling property "' . $propertyName . '" from "' . $oldValue->format('Y-m-d H:i:s') . '" to "' . $newValue->format('Y-m-d H:i:s') . '"');
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -398,8 +442,7 @@ class AnonymizeCommandController extends CommandController
     {
         $chars = [];
 
-        for($i = 0, $length = mb_strlen($string); $i < $length; ++$i)
-        {
+        for ($i = 0, $length = mb_strlen($string); $i < $length; ++$i) {
             $chars[] = mb_substr($string, $i, 1, 'UTF-8');
         }
 
