@@ -9,6 +9,8 @@ Anonymize property values in Neos CMS NodeTypes and Neos Flow Domain Models.
 ## Installation
 ```
 composer require jvmtech/anonymizer
+
+./flow doctrine:migrate
 ```
 
 ## Neos Compatibility
